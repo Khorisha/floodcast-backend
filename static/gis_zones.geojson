@@ -1,0 +1,77 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"name": "Vallee des Pretres", "risk": 4.274, "color": "#d73027"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[57.505, -20.173], [57.509, -20.173], [57.509, -20.177], [57.505, -20.177], [57.505, -20.173]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "La Cure", "risk": 4.048, "color": "#fc8d59"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[57.508, -20.180], [57.512, -20.180], [57.512, -20.184], [57.508, -20.184], [57.508, -20.180]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "Bell Village", "risk": 4.083, "color": "#fc8d59"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[57.500, -20.168], [57.504, -20.168], [57.504, -20.172], [57.500, -20.172], [57.500, -20.168]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "Plaine Verte", "risk": 3.956, "color": "#fee090"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[57.498, -20.159], [57.502, -20.159], [57.502, -20.163], [57.498, -20.163], [57.498, -20.159]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "Roche Bois", "risk": 3.966, "color": "#fee090"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[57.507, -20.146], [57.511, -20.146], [57.511, -20.150], [57.507, -20.150], [57.507, -20.146]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "CBD", "risk": 3.874, "color": "#fee090"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[57.497, -20.160], [57.501, -20.160], [57.501, -20.164], [57.497, -20.164], [57.497, -20.160]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "Vallee Pitot", "risk": 3.850, "color": "#91cf60"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[57.495, -20.163], [57.499, -20.163], [57.499, -20.167], [57.495, -20.167], [57.495, -20.163]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "Champ de Mars", "risk": 3.581, "color": "#91cf60"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[57.502, -20.153], [57.506, -20.153], [57.506, -20.157], [57.502, -20.157], [57.502, -20.153]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "Canal Dayot", "risk": 3.068, "color": "#91cf60"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[57.494, -20.156], [57.498, -20.156], [57.498, -20.160], [57.494, -20.160], [57.494, -20.156]]]
+      }
+    }
+  ]
+}

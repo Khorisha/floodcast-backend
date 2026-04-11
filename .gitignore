@@ -1,0 +1,27 @@
+# Ignore Python virtual environments
+venv/
+.env/
+
+# Ignore compiled Python files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore model weights and checkpoints
+backend/models/
+*.pkl
+*.tflite
+
+# Ignore data and logs
+backend/data/
+*.log
+*.tmp
+
+# Ignore static build artifacts
+backend/static/
+dist/
+build/
+
+# VSCode settings
+.vscode/
