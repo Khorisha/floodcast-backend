@@ -138,6 +138,7 @@ def get_7day_forecast():
         daily_summary = []
         current_date = None
         daily_rain = 0
+        daily_max_prob = 0
         
         for hour in forecast:
             try:
@@ -147,12 +148,27 @@ def get_7day_forecast():
             
             date_key = hour_time.strftime('%Y-%m-%d')
             
+            # Prepare weather data for this hour to get model prediction
+            weather_for_predict = [{
+                'Rainfall_mmhr': hour.get('rainfall', 0),
+                'Temperature_C': hour.get('temperature', 25),
+                'Humidity_pct': hour.get('humidity', 70),
+                'WindSpeed_ms': hour.get('wind_speed', 5),
+                'WindDir_deg': 180,
+                'SoilMoist_top_m3': 0.25,
+                'SoilMoist_deep_m3': 0.30
+            }] * 24  # Repeat same hour 24 times for sequence
+            
+            wet = is_wet_season()
+            prediction = predictor.predict(weather_for_predict, wet_season=wet)
+            hour_prob = prediction.get('calibrated_probability', 0.02)
+            
             if current_date is None:
                 current_date = date_key
             
             if date_key != current_date:
-                # Calculate risk score based on rainfall
-                risk_score = min(0.95, daily_rain / 50)
+                # Calculate risk score based on max probability for the day
+                risk_score = min(0.95, daily_max_prob)
                 
                 daily_summary.append({
                     'date': current_date,
@@ -161,13 +177,17 @@ def get_7day_forecast():
                 })
                 current_date = date_key
                 daily_rain = 0
+                daily_max_prob = 0
             
             rain = hour.get('rainfall', 0)
             daily_rain += rain
+            
+            if hour_prob > daily_max_prob:
+                daily_max_prob = hour_prob
         
         # Add last day
         if daily_rain > 0 or len(daily_summary) < 7:
-            risk_score = min(0.95, daily_rain / 50)
+            risk_score = min(0.95, daily_max_prob)
             daily_summary.append({
                 'date': current_date,
                 'total_rainfall': round(daily_rain, 1),
@@ -183,6 +203,8 @@ def get_7day_forecast():
                 'max_risk_score': 0.01
             })
         
+        print(f"Forecast generated for {len(daily_summary)} days")
+        
         return jsonify({
             'forecast': daily_summary[:7],
             'hourly_data': forecast[:168]
@@ -193,7 +215,7 @@ def get_7day_forecast():
         import traceback
         traceback.print_exc()
         return jsonify({'forecast': [], 'hourly_data': []})
-    
+        
 @app.route('/api/gis/zones', methods=['GET'])
 def get_gis_zones():
     try:
