@@ -1,9 +1,15 @@
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+
+import warnings
+warnings.filterwarnings('ignore')
+
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from datetime import datetime, timedelta
 import numpy as np
-import json
 
 from utils.weather_api import get_current_weather, get_forecast_7days, get_historical_hours
 from utils.predictor import FloodPredictor
@@ -16,8 +22,10 @@ model_path = os.path.join(os.path.dirname(__file__), 'models', 'final_model.tfli
 scaler_path = os.path.join(os.path.dirname(__file__), 'models', 'scaler.pkl')
 iso_path = os.path.join(os.path.dirname(__file__), 'models', 'gru_iso.pkl')
 
+print("Loading models...")
 predictor = FloodPredictor(model_path, scaler_path, iso_path)
 zone_risks = load_zone_risks()
+print("Models loaded successfully")
 
 def is_wet_season():
     current_month = datetime.now().month
@@ -37,13 +45,7 @@ def health_check():
 @app.route('/api/predict/now', methods=['GET'])
 def predict_now():
     try:
-        print("\n" + "="*60)
-        print("NEW PREDICTION REQUEST at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        print("="*60)
-        
         current = get_current_weather()
-        print(f"Weather data received: Temp={current.get('temp')}C, Humidity={current.get('humidity')}%, Rain={current.get('rain_1h')}mm")
-        
         historical = get_historical_hours(24)
         
         if len(historical) < 24:
@@ -69,13 +71,7 @@ def predict_now():
             })
         
         wet = is_wet_season()
-        print(f"Season: {'Wet' if wet else 'Dry'}")
-        
         prediction = predictor.predict(weather_for_predict, wet_season=wet)
-        print(f"Raw prediction probability: {prediction.get('raw_probability', 0):.4f}")
-        print(f"Calibrated probability: {prediction.get('calibrated_probability', 0):.4f}")
-        print(f"Final prediction: {'FLOOD' if prediction.get('prediction') == 1 else 'NO FLOOD'}")
-        print(f"Threshold used: {prediction.get('threshold_used', 0)}")
         
         zone_probs = apply_gis_multiplier(prediction['calibrated_probability'], zone_risks)
         
@@ -88,11 +84,6 @@ def predict_now():
                 'message': message
             }
         
-        top_zones = sorted(zone_probs.items(), key=lambda x: x[1], reverse=True)[:3]
-        print(f"Top 3 risk zones:")
-        for zone, prob in top_zones:
-            print(f"  - {zone}: {prob:.2%}")
-        
         response = {
             'timestamp': datetime.now().isoformat(),
             'city_prediction': prediction,
@@ -101,16 +92,10 @@ def predict_now():
             'wet_season': wet
         }
         
-        print("\n" + "-"*40)
-        print(f"RESPONSE SENT: Flood Probability = {prediction['calibrated_probability']*100:.1f}%")
-        print("-"*40 + "\n")
-        
         return jsonify(response)
     
     except Exception as e:
-        print(f"ERROR in predict_now: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Prediction error: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/predict/hour/<path:offset>', methods=['GET'])
@@ -120,8 +105,6 @@ def predict_for_hour(offset):
         target_time = datetime.now() + timedelta(hours=offset)
         mock_prob = get_mock_probability(offset)
         wet = is_wet_season()
-        
-        print(f"Hour prediction request: offset={offset}, probability={mock_prob:.3f}")
         
         prediction = {
             'calibrated_probability': mock_prob,
@@ -150,7 +133,6 @@ def predict_for_hour(offset):
 @app.route('/api/forecast/7day', methods=['GET'])
 def get_7day_forecast():
     try:
-        print("Fetching 7-day forecast...")
         forecast = get_forecast_7days()
         
         daily_summary = []
@@ -193,8 +175,6 @@ def get_7day_forecast():
                 'max_risk_score': round(min(1.0, daily_max_risk / 100), 3)
             })
         
-        print(f"Forecast generated for {len(daily_summary)} days")
-        
         return jsonify({
             'forecast': daily_summary[:7],
             'hourly_data': forecast[:168]
@@ -233,35 +213,24 @@ def get_gis_zones():
 
 @app.route('/api/shap/features', methods=['POST'])
 def get_shap_importance():
-    try:
-        print("SHAP features requested")
-        
-        feature_importance = [
-            {'feature': 'Rain_sum_6h', 'shap_value': 0.00085, 'direction': 'positive', 'description': 'Total rainfall over past 6 hours'},
-            {'feature': 'Rain_sum_12h', 'shap_value': 0.00067, 'direction': 'positive', 'description': 'Total rainfall over past 12 hours'},
-            {'feature': 'API', 'shap_value': 0.00060, 'direction': 'positive', 'description': 'Antecedent Precipitation Index'},
-            {'feature': 'Rain_sum_3h', 'shap_value': 0.00056, 'direction': 'positive', 'description': 'Total rainfall over past 3 hours'},
-            {'feature': 'Rainfall_mmhr', 'shap_value': 0.00055, 'direction': 'positive', 'description': 'Current hourly rainfall intensity'},
-            {'feature': 'CFSI', 'shap_value': 0.00038, 'direction': 'positive', 'description': 'Composite Flood Susceptibility Index'},
-            {'feature': 'SoilMoist_top_m3', 'shap_value': 0.00035, 'direction': 'positive', 'description': 'Surface soil moisture'},
-            {'feature': 'Rainfall_gradient_3h', 'shap_value': 0.00022, 'direction': 'positive', 'description': 'Change in rainfall intensity'},
-            {'feature': 'Temperature_C', 'shap_value': 0.00021, 'direction': 'negative', 'description': 'Air temperature'},
-            {'feature': 'WindDir_sin', 'shap_value': 0.00015, 'direction': 'neutral', 'description': 'Wind direction'}
-        ]
-        
-        response = {
-            'feature_importance': feature_importance,
-            'top_feature': feature_importance[0]['feature'],
-            'top_shap_value': feature_importance[0]['shap_value']
-        }
-        
-        print(f"SHAP response sent with {len(feature_importance)} features")
-        
-        return jsonify(response)
+    feature_importance = [
+        {'feature': 'Rain_sum_6h', 'shap_value': 0.00085, 'direction': 'positive', 'description': 'Total rainfall over past 6 hours'},
+        {'feature': 'Rain_sum_12h', 'shap_value': 0.00067, 'direction': 'positive', 'description': 'Total rainfall over past 12 hours'},
+        {'feature': 'API', 'shap_value': 0.00060, 'direction': 'positive', 'description': 'Antecedent Precipitation Index'},
+        {'feature': 'Rain_sum_3h', 'shap_value': 0.00056, 'direction': 'positive', 'description': 'Total rainfall over past 3 hours'},
+        {'feature': 'Rainfall_mmhr', 'shap_value': 0.00055, 'direction': 'positive', 'description': 'Current hourly rainfall intensity'},
+        {'feature': 'CFSI', 'shap_value': 0.00038, 'direction': 'positive', 'description': 'Composite Flood Susceptibility Index'},
+        {'feature': 'SoilMoist_top_m3', 'shap_value': 0.00035, 'direction': 'positive', 'description': 'Surface soil moisture'},
+        {'feature': 'Rainfall_gradient_3h', 'shap_value': 0.00022, 'direction': 'positive', 'description': 'Change in rainfall intensity'},
+        {'feature': 'Temperature_C', 'shap_value': 0.00021, 'direction': 'negative', 'description': 'Air temperature'},
+        {'feature': 'WindDir_sin', 'shap_value': 0.00015, 'direction': 'neutral', 'description': 'Wind direction'}
+    ]
     
-    except Exception as e:
-        print(f"SHAP error: {e}")
-        return jsonify({'error': str(e)}), 500
+    return jsonify({
+        'feature_importance': feature_importance,
+        'top_feature': feature_importance[0]['feature'],
+        'top_shap_value': feature_importance[0]['shap_value']
+    })
 
 @app.route('/api/shap/temporal', methods=['POST'])
 def get_temporal_shap():
@@ -301,25 +270,6 @@ def get_zone_risk_multipliers():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    print("\n" + "="*60)
-    print("FloodCast Backend Server Starting...")
-    print("="*60)
-    print(f"Model path: {model_path}")
-    print(f"Scaler path: {scaler_path}")
-    print(f"ISO path: {iso_path}")
-    print(f"Zone risks loaded: {len(zone_risks)} zones")
-    print("\nAvailable endpoints:")
-    print("  GET  /health")
-    print("  GET  /api/predict/now")
-    print("  GET  /api/predict/hour/<offset>")
-    print("  GET  /api/forecast/7day")
-    print("  GET  /api/gis/zones")
-    print("  POST /api/shap/features")
-    print("  POST /api/shap/temporal")
-    print("\n" + "="*60)
-    print("Server running on http://127.0.0.1:5000")
-    print("Press CTRL+C to stop")
-    print("="*60 + "\n")
-    
     port = int(os.environ.get('PORT', 5000))
+    print(f"Starting FloodCast server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
