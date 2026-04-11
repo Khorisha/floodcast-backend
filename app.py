@@ -138,7 +138,6 @@ def get_7day_forecast():
         daily_summary = []
         current_date = None
         daily_rain = 0
-        daily_max_risk = 0
         
         for hour in forecast:
             try:
@@ -152,27 +151,36 @@ def get_7day_forecast():
                 current_date = date_key
             
             if date_key != current_date:
+                # Calculate risk score based on rainfall
+                risk_score = min(0.95, daily_rain / 50)
+                
                 daily_summary.append({
                     'date': current_date,
                     'total_rainfall': round(daily_rain, 1),
-                    'max_risk_score': round(min(1.0, daily_max_risk / 100), 3)
+                    'max_risk_score': round(risk_score, 3)
                 })
                 current_date = date_key
                 daily_rain = 0
-                daily_max_risk = 0
             
             rain = hour.get('rainfall', 0)
             daily_rain += rain
-            
-            risk = rain * 5
-            if risk > daily_max_risk:
-                daily_max_risk = risk
         
+        # Add last day
         if daily_rain > 0 or len(daily_summary) < 7:
+            risk_score = min(0.95, daily_rain / 50)
             daily_summary.append({
                 'date': current_date,
                 'total_rainfall': round(daily_rain, 1),
-                'max_risk_score': round(min(1.0, daily_max_risk / 100), 3)
+                'max_risk_score': round(risk_score, 3)
+            })
+        
+        # Ensure we have 7 days
+        while len(daily_summary) < 7:
+            last_date = datetime.now() + timedelta(days=len(daily_summary))
+            daily_summary.append({
+                'date': last_date.strftime('%Y-%m-%d'),
+                'total_rainfall': 0,
+                'max_risk_score': 0.01
             })
         
         return jsonify({
@@ -182,8 +190,10 @@ def get_7day_forecast():
     
     except Exception as e:
         print(f"Forecast error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'forecast': [], 'hourly_data': []})
-
+    
 @app.route('/api/gis/zones', methods=['GET'])
 def get_gis_zones():
     try:
