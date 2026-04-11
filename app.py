@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
-from utils.weather_api import get_current_weather, get_forecast_7days, get_historical_hours, get_historical_hours_for_date_range
+from utils.weather_api import get_current_weather, get_forecast_7days, get_historical_hours, get_hours_for_date
 from utils.predictor import FloodPredictor
 from utils.gis_fusion import load_zone_risks, apply_gis_multiplier, get_zone_geojson, get_alert_level
 
@@ -338,12 +338,10 @@ def predict_for_date(date_str):
                 }
 
         else:
-            # Historical date: use archive API
-            start_time = target_date.replace(hour=0, minute=0, second=0)
-            end_time = target_date.replace(hour=23, minute=59, second=59)
-            historical = get_historical_hours_for_date_range(start_time, end_time)
+            # Historical date: use forecast API for recent dates, archive for older ones
+            historical = get_hours_for_date(target_date)
             if len(historical) < 24:
-                return jsonify({'error': f'Insufficient data: only {len(historical)} hours available. The weather archive has a delay of a few days for recent dates.'}), 400
+                return jsonify({'error': f'Insufficient data: only {len(historical)} hours available for {date_str}. The weather archive may not cover this date yet.'}), 400
             for hour in historical[-24:]:
                 weather_for_predict.append({
                     'Rainfall_mmhr': hour.get('rainfall', 0),
