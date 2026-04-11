@@ -144,3 +144,53 @@ def generate_mock_historical(hours_back):
             'soil_moisture': 0.25
         })
     return records
+
+def get_historical_hours_for_date_range(start_time, end_time):
+    """Get historical weather data for a specific date range"""
+    try:
+        url = 'https://archive-api.open-meteo.com/v1/archive'
+        params = {
+            'latitude': PORT_LOUIS_LAT,
+            'longitude': PORT_LOUIS_LON,
+            'start_date': start_time.strftime('%Y-%m-%d'),
+            'end_date': end_time.strftime('%Y-%m-%d'),
+            'hourly': 'temperature_2m,relative_humidity_2m,precipitation,pressure_msl,wind_speed_10m,wind_direction_10m,soil_moisture_0_to_7cm',
+            'timezone': 'Indian/Mauritius'
+        }
+        response = requests.get(url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            hourly = data['hourly']
+            records = []
+            for i in range(len(hourly['time'])):
+                records.append({
+                    'time': hourly['time'][i],
+                    'temperature': hourly['temperature_2m'][i],
+                    'humidity': hourly['relative_humidity_2m'][i],
+                    'rainfall': hourly['precipitation'][i],
+                    'pressure': hourly['pressure_msl'][i],
+                    'wind_speed': hourly['wind_speed_10m'][i],
+                    'wind_dir': hourly['wind_direction_10m'][i],
+                    'soil_moisture': hourly.get('soil_moisture_0_to_7cm', [0.25]*len(hourly['time']))[i]
+                })
+            return records
+    except Exception as e:
+        print(f"Historical date range error: {e}")
+    
+    # Return mock data if API fails
+    records = []
+    current = start_time
+    while current <= end_time:
+        records.append({
+            'time': current.isoformat(),
+            'temperature': 25,
+            'humidity': 70,
+            'rainfall': 0,
+            'pressure': 1013,
+            'wind_speed': 5,
+            'wind_dir': 180,
+            'soil_moisture': 0.25
+        })
+        current += timedelta(hours=1)
+    return records

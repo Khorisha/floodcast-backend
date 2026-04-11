@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
-from utils.weather_api import get_current_weather, get_forecast_7days, get_historical_hours
+from utils.weather_api import get_current_weather, get_forecast_7days, get_historical_hours, get_historical_hours_for_date_range
 from utils.predictor import FloodPredictor
 from utils.gis_fusion import load_zone_risks, apply_gis_multiplier, get_zone_geojson, get_alert_level
 
@@ -291,6 +291,61 @@ def get_7day_forecast():
     except Exception as e:
         print(f"Forecast error: {e}")
         return jsonify({'forecast': []}), 500
+    
+@app.route('/api/predict/date/<date_str>', methods=['GET'])
+def predict_for_date(date_str):
+    try:
+        # Parse the date
+        target_date = datetime.strptime(date_str, '%Y-%m-%d')
+        
+        # Get historical data for that date (24 hours ending at midnight)
+        end_time = target_date.replace(hour=23, minute=59, second=59)
+        start_time = end_time - timedelta(hours=24)
+        
+        # Fetch historical weather data
+        historical = get_historical_hours_for_date_range(start_time, end_time)
+        
+        if len(historical) < 24:
+            return jsonify({'error': 'Insufficient historical data for this date'}), 400
+        
+        weather_for_predict = []
+        for hour in historical[-24:]:
+            weather_for_predict.append({
+                'Rainfall_mmhr': hour.get('rainfall', 0),
+                'Temperature_C': hour.get('temperature', 25),
+                'Humidity_pct': hour.get('humidity', 70),
+                'WindSpeed_ms': hour.get('wind_speed', 5),
+                'WindDir_deg': hour.get('wind_dir', 180),
+                'SoilMoist_top_m3': hour.get('soil_moisture', 0.25),
+                'SoilMoist_deep_m3': hour.get('soil_moisture', 0.30)
+            })
+        
+        wet = is_wet_season()
+        prediction = predictor.predict(weather_for_predict, wet_season=wet)
+        
+        zone_probs = apply_gis_multiplier(prediction['calibrated_probability'], zone_risks)
+        
+        zone_alerts = {}
+        for zone, prob in zone_probs.items():
+            color, message = get_alert_level(prob, wet)
+            zone_alerts[zone] = {
+                'probability': round(prob, 4),
+                'alert_level': color,
+                'message': message
+            }
+        
+        response = {
+            'date': date_str,
+            'city_prediction': prediction,
+            'zone_predictions': zone_alerts,
+            'wet_season': wet
+        }
+        
+        return jsonify(response)
+    
+    except Exception as e:
+        print(f"Date prediction error: {e}")
+        return jsonify({'error': str(e)}), 500
     
 @app.route('/api/gis/zones', methods=['GET'])
 def get_gis_zones():
