@@ -19,7 +19,7 @@ from utils.gis_fusion import load_zone_risks, apply_gis_multiplier, get_zone_geo
 app = Flask(__name__)
 
 # Configure CORS properly
-CORS(app, origins=['http://localhost:5173', 'http://localhost:5174', 'https://floodcast-backend-ttv1.onrender.com'])
+CORS(app)
 
 model_path = os.path.join(os.path.dirname(__file__), 'models', 'final_model.tflite')
 scaler_path = os.path.join(os.path.dirname(__file__), 'models', 'scaler.pkl')
