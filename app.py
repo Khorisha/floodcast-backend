@@ -219,8 +219,9 @@ def get_7day_forecast():
     try:
         forecast = get_forecast_7days()
         
-        # Group by day
-        daily_data = {}
+        daily_summary = []
+        current_date = None
+        daily_rain = 0
         
         for hour in forecast:
             try:
@@ -230,45 +231,51 @@ def get_7day_forecast():
             
             date_key = hour_time.strftime('%Y-%m-%d')
             
-            if date_key not in daily_data:
-                daily_data[date_key] = {
-                    'rainfall': 0,
-                    'hourly_probs': []
-                }
+            if current_date is None:
+                current_date = date_key
             
-            # Prepare weather for this specific hour
-            weather_for_predict = [{
-                'Rainfall_mmhr': hour.get('rainfall', 0),
-                'Temperature_C': hour.get('temperature', 25),
-                'Humidity_pct': hour.get('humidity', 70),
-                'WindSpeed_ms': hour.get('wind_speed', 5),
-                'WindDir_deg': 180,
-                'SoilMoist_top_m3': 0.25,
-                'SoilMoist_deep_m3': 0.30
-            }] * 24
+            if date_key != current_date:
+                if daily_rain > 50:
+                    risk_score = 0.35
+                elif daily_rain > 30:
+                    risk_score = 0.20
+                elif daily_rain > 15:
+                    risk_score = 0.10
+                elif daily_rain > 5:
+                    risk_score = 0.05
+                else:
+                    risk_score = 0.02
+                
+                daily_summary.append({
+                    'date': current_date,
+                    'total_rainfall': round(daily_rain, 1),
+                    'max_risk_score': risk_score
+                })
+                current_date = date_key
+                daily_rain = 0
             
-            wet = is_wet_season()
-            prediction = predictor.predict(weather_for_predict, wet_season=wet)
-            hour_prob = prediction.get('calibrated_probability', 0.02)
-            
-            daily_data[date_key]['rainfall'] += hour.get('rainfall', 0)
-            daily_data[date_key]['hourly_probs'].append(hour_prob)
+            rain = hour.get('rainfall', 0)
+            daily_rain += rain
         
-        daily_summary = []
-        for date, data in daily_data.items():
-            avg_prob = sum(data['hourly_probs']) / len(data['hourly_probs'])
-            risk_score = min(0.50, avg_prob)
+        # Add last day
+        if daily_rain > 0 or len(daily_summary) < 7:
+            if daily_rain > 50:
+                risk_score = 0.35
+            elif daily_rain > 30:
+                risk_score = 0.20
+            elif daily_rain > 15:
+                risk_score = 0.10
+            elif daily_rain > 5:
+                risk_score = 0.05
+            else:
+                risk_score = 0.02
             
             daily_summary.append({
-                'date': date,
-                'total_rainfall': round(data['rainfall'], 1),
-                'max_risk_score': round(risk_score, 3)
+                'date': current_date,
+                'total_rainfall': round(daily_rain, 1),
+                'max_risk_score': risk_score
             })
         
-        # Sort by date
-        daily_summary.sort(key=lambda x: x['date'])
-        
-        # Ensure we have 7 days
         while len(daily_summary) < 7:
             last_date = datetime.now() + timedelta(days=len(daily_summary))
             daily_summary.append({
@@ -277,8 +284,6 @@ def get_7day_forecast():
                 'max_risk_score': 0.01
             })
         
-        print(f"Forecast generated for {len(daily_summary)} days")
-        
         return jsonify({
             'forecast': daily_summary[:7]
         })
@@ -286,7 +291,7 @@ def get_7day_forecast():
     except Exception as e:
         print(f"Forecast error: {e}")
         return jsonify({'forecast': []}), 500
-
+    
 @app.route('/api/gis/zones', methods=['GET'])
 def get_gis_zones():
     try:
