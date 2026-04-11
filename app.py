@@ -281,32 +281,95 @@ def predict_for_date(date_str):
     try:
         print(f"Date endpoint called: {date_str}")
         target_date = datetime.strptime(date_str, '%Y-%m-%d')
-        
-        start_time = target_date.replace(hour=0, minute=0, second=0)
-        end_time = target_date.replace(hour=23, minute=59, second=59)
-        
-        historical = get_historical_hours_for_date_range(start_time, end_time)
-        
-        if len(historical) < 24:
-            return jsonify({'error': f'Insufficient data: only {len(historical)} hours'}), 400
-        
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        days_diff = (target_date.date() - today.date()).days
+
         weather_for_predict = []
-        for hour in historical[-24:]:
-            weather_for_predict.append({
-                'Rainfall_mmhr': hour.get('rainfall', 0),
-                'Temperature_C': hour.get('temperature', 25),
-                'Humidity_pct': hour.get('humidity', 70),
-                'WindSpeed_ms': hour.get('wind_speed', 5),
-                'WindDir_deg': hour.get('wind_dir', 180),
-                'SoilMoist_top_m3': hour.get('soil_moisture', 0.25),
-                'SoilMoist_deep_m3': hour.get('soil_moisture', 0.30)
-            })
-        
+        current_weather_data = None
+
+        if days_diff == 0:
+            # Today: use same data source as /api/predict/now
+            current_weather_data = get_current_weather()
+            historical = get_historical_hours(24)
+            if len(historical) < 24:
+                return jsonify({'error': 'Insufficient historical data for today'}), 400
+            for hour in historical[-24:]:
+                weather_for_predict.append({
+                    'Rainfall_mmhr': hour.get('rainfall', 0),
+                    'Temperature_C': hour.get('temperature', 25),
+                    'Humidity_pct': hour.get('humidity', 70),
+                    'WindSpeed_ms': hour.get('wind_speed', 5),
+                    'WindDir_deg': hour.get('wind_dir', 180),
+                    'SoilMoist_top_m3': hour.get('soil_moisture', 0.25),
+                    'SoilMoist_deep_m3': hour.get('soil_moisture', 0.30)
+                })
+
+        elif days_diff > 0:
+            # Future date: use 7-day forecast data
+            if days_diff > 7:
+                return jsonify({'error': 'Forecast only available up to 7 days ahead'}), 400
+            forecast = get_forecast_7days()
+            target_date_key = target_date.strftime('%Y-%m-%d')
+            date_hours = [h for h in forecast if h['time'][:10] == target_date_key]
+            if len(date_hours) < 12:
+                return jsonify({'error': f'No forecast data available for {date_str}'}), 400
+            source_hours = date_hours[:24]
+            while len(source_hours) < 24:
+                source_hours.append(source_hours[-1])
+            for hour in source_hours:
+                weather_for_predict.append({
+                    'Rainfall_mmhr': hour.get('rainfall', 0),
+                    'Temperature_C': hour.get('temperature', 25),
+                    'Humidity_pct': hour.get('humidity', 70),
+                    'WindSpeed_ms': hour.get('wind_speed', 5),
+                    'WindDir_deg': hour.get('wind_dir', 180),
+                    'SoilMoist_top_m3': 0.25,
+                    'SoilMoist_deep_m3': 0.30
+                })
+            if date_hours:
+                first = date_hours[0]
+                current_weather_data = {
+                    'temp': first.get('temperature'),
+                    'humidity': first.get('humidity'),
+                    'wind_speed': first.get('wind_speed'),
+                    'wind_dir': first.get('wind_dir'),
+                    'pressure': first.get('pressure'),
+                    'rain_1h': first.get('rainfall', 0)
+                }
+
+        else:
+            # Historical date: use archive API
+            start_time = target_date.replace(hour=0, minute=0, second=0)
+            end_time = target_date.replace(hour=23, minute=59, second=59)
+            historical = get_historical_hours_for_date_range(start_time, end_time)
+            if len(historical) < 24:
+                return jsonify({'error': f'Insufficient data: only {len(historical)} hours available. The weather archive has a delay of a few days for recent dates.'}), 400
+            for hour in historical[-24:]:
+                weather_for_predict.append({
+                    'Rainfall_mmhr': hour.get('rainfall', 0),
+                    'Temperature_C': hour.get('temperature', 25),
+                    'Humidity_pct': hour.get('humidity', 70),
+                    'WindSpeed_ms': hour.get('wind_speed', 5),
+                    'WindDir_deg': hour.get('wind_dir', 180),
+                    'SoilMoist_top_m3': hour.get('soil_moisture', 0.25),
+                    'SoilMoist_deep_m3': hour.get('soil_moisture', 0.30)
+                })
+            if historical:
+                first = historical[0]
+                current_weather_data = {
+                    'temp': first.get('temperature'),
+                    'humidity': first.get('humidity'),
+                    'wind_speed': first.get('wind_speed'),
+                    'wind_dir': first.get('wind_dir'),
+                    'pressure': first.get('pressure'),
+                    'rain_1h': first.get('rainfall', 0)
+                }
+
         wet = is_wet_season()
         prediction = predictor.predict(weather_for_predict, wet_season=wet)
-        
+
         zone_probs = apply_gis_multiplier(prediction['calibrated_probability'], zone_risks)
-        
+
         zone_alerts = {}
         for zone, prob in zone_probs.items():
             color, message = get_alert_level(prob, wet)
@@ -315,16 +378,17 @@ def predict_for_date(date_str):
                 'alert_level': color,
                 'message': message
             }
-        
+
         response = {
             'date': date_str,
             'city_prediction': prediction,
             'zone_predictions': zone_alerts,
+            'current_weather': current_weather_data,
             'wet_season': wet
         }
-        
+
         return jsonify(response)
-    
+
     except Exception as e:
         print(f"Date prediction error: {e}")
         import traceback
