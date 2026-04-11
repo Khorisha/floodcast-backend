@@ -10,6 +10,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from datetime import datetime, timedelta
 import numpy as np
+import pandas as pd
 
 from utils.weather_api import get_current_weather, get_forecast_7days, get_historical_hours
 from utils.predictor import FloodPredictor
@@ -21,22 +22,87 @@ CORS(app)
 model_path = os.path.join(os.path.dirname(__file__), 'models', 'final_model.tflite')
 scaler_path = os.path.join(os.path.dirname(__file__), 'models', 'scaler.pkl')
 iso_path = os.path.join(os.path.dirname(__file__), 'models', 'gru_iso.pkl')
+shap_path = os.path.join(os.path.dirname(__file__), 'models', 'shap_values.npy')
 
 print("Loading models...")
 predictor = FloodPredictor(model_path, scaler_path, iso_path)
 zone_risks = load_zone_risks()
 print("Models loaded successfully")
 
+# Load real SHAP values from notebook
+shap_values = None
+feature_names = [
+    'Rain_sum_6h', 'Rain_sum_12h', 'API', 'Rain_sum_3h', 'Rainfall_mmhr',
+    'SoilMoist_top_m3', 'Rain_sum_24h', 'Rainfall_lag1h', 'SM_lag6h', 'CFSI',
+    'WindDir_cos', 'WindDir_sin', 'Rainfall_gradient_3h', 'WindSpeed_ms',
+    'SM_anomaly', 'SoilMoist_deep_m3', 'Humidity_pct', 'Temperature_C'
+]
+
+try:
+    if os.path.exists(shap_path):
+        shap_data = np.load(shap_path, allow_pickle=True)
+        if isinstance(shap_data, np.ndarray) and shap_data.size > 0:
+            shap_values = np.abs(shap_data).mean(axis=(0, 1))
+            print(f"Loaded SHAP values shape: {shap_data.shape}")
+        else:
+            print("SHAP file empty, using fallback")
+            shap_values = None
+    else:
+        print(f"SHAP file not found at {shap_path}")
+        shap_values = None
+except Exception as e:
+    print(f"Error loading SHAP values: {e}")
+    shap_values = None
+
+def get_feature_description(feature):
+    descriptions = {
+        'Rain_sum_6h': 'Total rainfall over past 6 hours',
+        'Rain_sum_12h': 'Total rainfall over past 12 hours',
+        'API': 'Antecedent Precipitation Index - multi-day rainfall memory',
+        'Rain_sum_3h': 'Total rainfall over past 3 hours',
+        'Rainfall_mmhr': 'Current hourly rainfall intensity',
+        'SoilMoist_top_m3': 'Surface soil moisture (0-7cm depth)',
+        'Rain_sum_24h': 'Total rainfall over past 24 hours',
+        'Rainfall_lag1h': 'Rainfall intensity 1 hour ago',
+        'SM_lag6h': 'Soil moisture 6 hours ago',
+        'CFSI': 'Composite Flood Susceptibility Index',
+        'WindDir_cos': 'Wind direction cosine component',
+        'WindDir_sin': 'Wind direction sine component',
+        'Rainfall_gradient_3h': 'Change in rainfall intensity over 3 hours',
+        'WindSpeed_ms': 'Wind speed in meters per second',
+        'SM_anomaly': 'Soil moisture deviation from monthly normal',
+        'SoilMoist_deep_m3': 'Deep soil moisture (7-28cm depth)',
+        'Humidity_pct': 'Relative humidity percentage',
+        'Temperature_C': 'Air temperature in Celsius'
+    }
+    return descriptions.get(feature, feature.replace('_', ' '))
+
+def get_feature_display_name(feature):
+    names = {
+        'Rain_sum_6h': 'Rainfall last 6 hours',
+        'Rain_sum_12h': 'Rainfall last 12 hours',
+        'API': 'Past days rainfall',
+        'Rain_sum_3h': 'Rainfall last 3 hours',
+        'Rainfall_mmhr': 'Current rainfall rate',
+        'SoilMoist_top_m3': 'Surface soil moisture',
+        'Rain_sum_24h': 'Rainfall last 24 hours',
+        'Rainfall_lag1h': 'Rainfall 1 hour ago',
+        'SM_lag6h': 'Soil moisture 6h ago',
+        'CFSI': 'Flood susceptibility',
+        'WindDir_cos': 'Wind direction',
+        'WindDir_sin': 'Wind direction',
+        'Rainfall_gradient_3h': 'Rain intensification',
+        'WindSpeed_ms': 'Wind speed',
+        'SM_anomaly': 'Soil moisture anomaly',
+        'SoilMoist_deep_m3': 'Deep soil moisture',
+        'Humidity_pct': 'Humidity',
+        'Temperature_C': 'Temperature'
+    }
+    return names.get(feature, feature.replace('_', ' '))
+
 def is_wet_season():
     current_month = datetime.now().month
     return current_month in [11, 12, 1, 2, 3, 4]
-
-def get_mock_probability(offset):
-    if offset <= 0:
-        prob = 0.02 + abs(offset) * 0.003
-    else:
-        prob = 0.02 + offset * 0.002
-    return min(0.30, max(0.01, prob))
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -103,17 +169,35 @@ def predict_for_hour(offset):
     try:
         offset = int(offset)
         target_time = datetime.now() + timedelta(hours=offset)
-        mock_prob = get_mock_probability(offset)
-        wet = is_wet_season()
         
-        prediction = {
-            'calibrated_probability': mock_prob,
-            'raw_probability': mock_prob,
-            'prediction': 1 if mock_prob >= 0.02 else 0,
-            'threshold_used': 0.02,
-            'wet_season': wet
-        }
-        zone_probs = apply_gis_multiplier(mock_prob, zone_risks)
+        historical = get_historical_hours(24)
+        
+        if len(historical) < 24:
+            while len(historical) < 24:
+                historical.insert(0, {
+                    'temperature': 25, 'humidity': 70, 'rainfall': 0,
+                    'pressure': 1013, 'wind_speed': 5, 'wind_dir': 180,
+                    'soil_moisture': 0.25
+                })
+        
+        last_24h = historical[-24:]
+        
+        weather_for_predict = []
+        for hour in last_24h:
+            weather_for_predict.append({
+                'Rainfall_mmhr': hour.get('rainfall', 0),
+                'Temperature_C': hour.get('temperature', 25),
+                'Humidity_pct': hour.get('humidity', 70),
+                'WindSpeed_ms': hour.get('wind_speed', 5),
+                'WindDir_deg': hour.get('wind_dir', 180),
+                'SoilMoist_top_m3': hour.get('soil_moisture', 0.25),
+                'SoilMoist_deep_m3': hour.get('soil_moisture', 0.30)
+            })
+        
+        wet = is_wet_season()
+        prediction = predictor.predict(weather_for_predict, wet_season=wet)
+        
+        zone_probs = apply_gis_multiplier(prediction['calibrated_probability'], zone_risks)
         
         response = {
             'target_hour': target_time.isoformat(),
@@ -124,8 +208,6 @@ def predict_for_hour(offset):
         
         return jsonify(response)
     
-    except ValueError:
-        return jsonify({'error': f'Invalid offset: {offset}'}), 400
     except Exception as e:
         print(f"Hour prediction error: {e}")
         return jsonify({'error': str(e)}), 500
@@ -133,10 +215,23 @@ def predict_for_hour(offset):
 @app.route('/api/forecast/7day', methods=['GET'])
 def get_7day_forecast():
     try:
+        historical = get_historical_hours(24)
+        
+        if len(historical) < 24:
+            while len(historical) < 24:
+                historical.insert(0, {
+                    'temperature': 25, 'humidity': 70, 'rainfall': 0,
+                    'pressure': 1013, 'wind_speed': 5, 'wind_dir': 180,
+                    'soil_moisture': 0.25
+                })
+        
+        base_context = historical[-24:]
         forecast = get_forecast_7days()
         
-        # Group by day
-        daily_data = {}
+        daily_summary = []
+        current_date = None
+        daily_rain = 0
+        daily_hourly_probs = []
         
         for hour in forecast:
             try:
@@ -146,14 +241,20 @@ def get_7day_forecast():
             
             date_key = hour_time.strftime('%Y-%m-%d')
             
-            if date_key not in daily_data:
-                daily_data[date_key] = {
-                    'rainfall': 0,
-                    'hourly_probs': []
-                }
+            weather_sequence = []
             
-            # Prepare weather for this specific hour
-            weather_for_predict = [{
+            for ctx_hour in base_context[-23:]:
+                weather_sequence.append({
+                    'Rainfall_mmhr': ctx_hour.get('rainfall', 0),
+                    'Temperature_C': ctx_hour.get('temperature', 25),
+                    'Humidity_pct': ctx_hour.get('humidity', 70),
+                    'WindSpeed_ms': ctx_hour.get('wind_speed', 5),
+                    'WindDir_deg': ctx_hour.get('wind_dir', 180),
+                    'SoilMoist_top_m3': ctx_hour.get('soil_moisture', 0.25),
+                    'SoilMoist_deep_m3': ctx_hour.get('soil_moisture', 0.30)
+                })
+            
+            weather_sequence.append({
                 'Rainfall_mmhr': hour.get('rainfall', 0),
                 'Temperature_C': hour.get('temperature', 25),
                 'Humidity_pct': hour.get('humidity', 70),
@@ -161,32 +262,41 @@ def get_7day_forecast():
                 'WindDir_deg': 180,
                 'SoilMoist_top_m3': 0.25,
                 'SoilMoist_deep_m3': 0.30
-            }] * 24  # Need 24 hours of data for the model
+            })
             
             wet = is_wet_season()
-            prediction = predictor.predict(weather_for_predict, wet_season=wet)
+            prediction = predictor.predict(weather_sequence, wet_season=wet)
             hour_prob = prediction.get('calibrated_probability', 0.02)
             
-            daily_data[date_key]['rainfall'] += hour.get('rainfall', 0)
-            daily_data[date_key]['hourly_probs'].append(hour_prob)
-        
-        daily_summary = []
-        for date, data in daily_data.items():
-            # Use average probability for the day, not max
-            avg_prob = sum(data['hourly_probs']) / len(data['hourly_probs'])
-            # Cap at 0.50 for reasonable display
-            risk_score = min(0.50, avg_prob)
+            if current_date is None:
+                current_date = date_key
             
+            if date_key != current_date:
+                if daily_hourly_probs:
+                    avg_prob = sum(daily_hourly_probs) / len(daily_hourly_probs)
+                    risk_score = min(0.50, avg_prob)
+                    daily_summary.append({
+                        'date': current_date,
+                        'total_rainfall': round(daily_rain, 1),
+                        'max_risk_score': round(risk_score, 3)
+                    })
+                current_date = date_key
+                daily_rain = 0
+                daily_hourly_probs = []
+            
+            rain = hour.get('rainfall', 0)
+            daily_rain += rain
+            daily_hourly_probs.append(hour_prob)
+        
+        if daily_hourly_probs:
+            avg_prob = sum(daily_hourly_probs) / len(daily_hourly_probs)
+            risk_score = min(0.50, avg_prob)
             daily_summary.append({
-                'date': date,
-                'total_rainfall': round(data['rainfall'], 1),
+                'date': current_date,
+                'total_rainfall': round(daily_rain, 1),
                 'max_risk_score': round(risk_score, 3)
             })
         
-        # Sort by date
-        daily_summary.sort(key=lambda x: x['date'])
-        
-        # Ensure we have 7 days
         while len(daily_summary) < 7:
             last_date = datetime.now() + timedelta(days=len(daily_summary))
             daily_summary.append({
@@ -195,18 +305,14 @@ def get_7day_forecast():
                 'max_risk_score': 0.01
             })
         
-        print(f"Forecast generated for {len(daily_summary)} days")
-        
         return jsonify({
             'forecast': daily_summary[:7]
         })
     
     except Exception as e:
         print(f"Forecast error: {e}")
-        import traceback
-        traceback.print_exc()
         return jsonify({'forecast': []}), 500
-            
+
 @app.route('/api/gis/zones', methods=['GET'])
 def get_gis_zones():
     try:
@@ -236,24 +342,61 @@ def get_gis_zones():
 
 @app.route('/api/shap/features', methods=['POST'])
 def get_shap_importance():
-    feature_importance = [
-        {'feature': 'Rain_sum_6h', 'shap_value': 0.00085, 'direction': 'positive', 'description': 'Total rainfall over past 6 hours'},
-        {'feature': 'Rain_sum_12h', 'shap_value': 0.00067, 'direction': 'positive', 'description': 'Total rainfall over past 12 hours'},
-        {'feature': 'API', 'shap_value': 0.00060, 'direction': 'positive', 'description': 'Antecedent Precipitation Index'},
-        {'feature': 'Rain_sum_3h', 'shap_value': 0.00056, 'direction': 'positive', 'description': 'Total rainfall over past 3 hours'},
-        {'feature': 'Rainfall_mmhr', 'shap_value': 0.00055, 'direction': 'positive', 'description': 'Current hourly rainfall intensity'},
-        {'feature': 'CFSI', 'shap_value': 0.00038, 'direction': 'positive', 'description': 'Composite Flood Susceptibility Index'},
-        {'feature': 'SoilMoist_top_m3', 'shap_value': 0.00035, 'direction': 'positive', 'description': 'Surface soil moisture'},
-        {'feature': 'Rainfall_gradient_3h', 'shap_value': 0.00022, 'direction': 'positive', 'description': 'Change in rainfall intensity'},
-        {'feature': 'Temperature_C', 'shap_value': 0.00021, 'direction': 'negative', 'description': 'Air temperature'},
-        {'feature': 'WindDir_sin', 'shap_value': 0.00015, 'direction': 'neutral', 'description': 'Wind direction'}
-    ]
+    try:
+        # Use real SHAP values from notebook if available
+        if shap_values is not None and len(shap_values) == len(feature_names):
+            feature_importance = []
+            for i, feat in enumerate(feature_names):
+                shap_val = float(shap_values[i])
+                feature_importance.append({
+                    'feature': feat,
+                    'shap_value': shap_val,
+                    'direction': 'positive' if shap_val > 0 else 'negative',
+                    'display_name': get_feature_display_name(feat),
+                    'description': get_feature_description(feat)
+                })
+            feature_importance.sort(key=lambda x: x['shap_value'], reverse=True)
+        else:
+            # Fallback using your provided values
+            fallback_values = [
+                ('Rain_sum_6h', 0.0008515657172),
+                ('Rain_sum_12h', 0.0006733248584),
+                ('API', 0.0005986828681),
+                ('Rain_sum_3h', 0.0005592653234),
+                ('Rainfall_mmhr', 0.0005465588032),
+                ('SoilMoist_top_m3', 0.0004953022509),
+                ('Rain_sum_24h', 0.0003954397972),
+                ('Rainfall_lag1h', 0.0003932744291),
+                ('SM_lag6h', 0.0003487945225),
+                ('CFSI', 0.0002853855721),
+                ('WindDir_cos', 0.0002646260512),
+                ('WindDir_sin', 0.0002444837375),
+                ('Rainfall_gradient_3h', 0.0002429408941),
+                ('WindSpeed_ms', 0.0002336774326),
+                ('SM_anomaly', 0.0002235745481),
+                ('SoilMoist_deep_m3', 0.0002226286539),
+                ('Humidity_pct', 0.0002151004082),
+                ('Temperature_C', 0.0001706880645)
+            ]
+            feature_importance = []
+            for feat, val in fallback_values:
+                feature_importance.append({
+                    'feature': feat,
+                    'shap_value': val,
+                    'direction': 'positive' if val > 0 else 'negative',
+                    'display_name': get_feature_display_name(feat),
+                    'description': get_feature_description(feat)
+                })
+        
+        return jsonify({
+            'feature_importance': feature_importance,
+            'top_feature': feature_importance[0]['feature'],
+            'top_shap_value': feature_importance[0]['shap_value']
+        })
     
-    return jsonify({
-        'feature_importance': feature_importance,
-        'top_feature': feature_importance[0]['feature'],
-        'top_shap_value': feature_importance[0]['shap_value']
-    })
+    except Exception as e:
+        print(f"SHAP error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/shap/temporal', methods=['POST'])
 def get_temporal_shap():
