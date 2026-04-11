@@ -17,7 +17,9 @@ from utils.predictor import FloodPredictor
 from utils.gis_fusion import load_zone_risks, apply_gis_multiplier, get_zone_geojson, get_alert_level
 
 app = Flask(__name__)
-CORS(app)
+
+# Fix CORS - Allow all origins for development
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 model_path = os.path.join(os.path.dirname(__file__), 'models', 'final_model.tflite')
 scaler_path = os.path.join(os.path.dirname(__file__), 'models', 'scaler.pkl')
