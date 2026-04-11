@@ -117,12 +117,7 @@ def predict_now():
         historical = get_historical_hours(24)
         
         if len(historical) < 24:
-            while len(historical) < 24:
-                historical.insert(0, {
-                    'temperature': 25, 'humidity': 70, 'rainfall': 0,
-                    'pressure': 1013, 'wind_speed': 5, 'wind_dir': 180,
-                    'soil_moisture': 0.25
-                })
+            return jsonify({'error': 'Insufficient historical data'}), 400
         
         last_24h = historical[-24:]
         
@@ -172,18 +167,11 @@ def predict_for_hour(offset):
         offset = int(offset)
         target_time = datetime.now() + timedelta(hours=offset)
         
-        # Get the last 24 hours of historical data
         historical = get_historical_hours(24)
         
         if len(historical) < 24:
-            while len(historical) < 24:
-                historical.insert(0, {
-                    'temperature': 25, 'humidity': 70, 'rainfall': 0,
-                    'pressure': 1013, 'wind_speed': 5, 'wind_dir': 180,
-                    'soil_moisture': 0.25
-                })
+            return jsonify({'error': 'Insufficient historical data'}), 400
         
-        # Use the last 24 hours as the sequence
         weather_sequence = []
         for hour in historical[-24:]:
             weather_sequence.append({
@@ -257,7 +245,6 @@ def get_7day_forecast():
             rain = hour.get('rainfall', 0)
             daily_rain += rain
         
-        # Add last day
         if daily_rain > 0 or len(daily_summary) < 7:
             if daily_rain > 50:
                 risk_score = 0.35
@@ -295,14 +282,11 @@ def get_7day_forecast():
 @app.route('/api/predict/date/<date_str>', methods=['GET'])
 def predict_for_date(date_str):
     try:
-        # Parse the date
         target_date = datetime.strptime(date_str, '%Y-%m-%d')
         
-        # Get historical data for that date (24 hours ending at midnight)
         end_time = target_date.replace(hour=23, minute=59, second=59)
         start_time = end_time - timedelta(hours=24)
         
-        # Fetch historical weather data
         historical = get_historical_hours_for_date_range(start_time, end_time)
         
         if len(historical) < 24:
@@ -377,7 +361,6 @@ def get_gis_zones():
 @app.route('/api/shap/features', methods=['POST'])
 def get_shap_importance():
     try:
-        # Use real SHAP values from notebook if available
         if shap_values is not None and len(shap_values) == len(feature_names):
             feature_importance = []
             for i, feat in enumerate(feature_names):
@@ -391,7 +374,6 @@ def get_shap_importance():
                 })
             feature_importance.sort(key=lambda x: x['shap_value'], reverse=True)
         else:
-            # Fallback using your provided values from notebook
             fallback_values = [
                 ('Rain_sum_6h', 0.0008515657172),
                 ('Rain_sum_12h', 0.0006733248584),
