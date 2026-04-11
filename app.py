@@ -17,8 +17,6 @@ from utils.predictor import FloodPredictor
 from utils.gis_fusion import load_zone_risks, apply_gis_multiplier, get_zone_geojson, get_alert_level
 
 app = Flask(__name__)
-
-# Configure CORS properly
 CORS(app)
 
 model_path = os.path.join(os.path.dirname(__file__), 'models', 'final_model.tflite')
@@ -31,7 +29,7 @@ predictor = FloodPredictor(model_path, scaler_path, iso_path)
 zone_risks = load_zone_risks()
 print("Models loaded successfully")
 
-# Load real SHAP values from notebook
+# Load real SHAP values
 shap_values = None
 feature_names = [
     'Rain_sum_6h', 'Rain_sum_12h', 'API', 'Rain_sum_3h', 'Rainfall_mmhr',
@@ -47,10 +45,10 @@ try:
             shap_values = np.abs(shap_data).mean(axis=(0, 1))
             print(f"Loaded SHAP values shape: {shap_data.shape}")
         else:
-            print("SHAP file empty, using fallback")
+            print("SHAP file empty")
             shap_values = None
     else:
-        print(f"SHAP file not found at {shap_path}, using fallback values")
+        print(f"SHAP file not found at {shap_path}")
         shap_values = None
 except Exception as e:
     print(f"Error loading SHAP values: {e}")
@@ -161,10 +159,9 @@ def predict_now():
         print(f"Prediction error: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/predict/hour/<path:offset>', methods=['GET'])
+@app.route('/api/predict/hour/<int:offset>', methods=['GET'])
 def predict_for_hour(offset):
     try:
-        offset = int(offset)
         target_time = datetime.now() + timedelta(hours=offset)
         
         historical = get_historical_hours(24)
@@ -201,7 +198,7 @@ def predict_for_hour(offset):
     except Exception as e:
         print(f"Hour prediction error: {e}")
         return jsonify({'error': str(e)}), 500
-    
+
 @app.route('/api/forecast/7day', methods=['GET'])
 def get_7day_forecast():
     try:
@@ -278,19 +275,20 @@ def get_7day_forecast():
     except Exception as e:
         print(f"Forecast error: {e}")
         return jsonify({'forecast': []}), 500
-    
+
 @app.route('/api/predict/date/<date_str>', methods=['GET'])
 def predict_for_date(date_str):
     try:
+        print(f"Date endpoint called: {date_str}")
         target_date = datetime.strptime(date_str, '%Y-%m-%d')
         
+        start_time = target_date.replace(hour=0, minute=0, second=0)
         end_time = target_date.replace(hour=23, minute=59, second=59)
-        start_time = end_time - timedelta(hours=24)
         
         historical = get_historical_hours_for_date_range(start_time, end_time)
         
         if len(historical) < 24:
-            return jsonify({'error': 'Insufficient historical data for this date'}), 400
+            return jsonify({'error': f'Insufficient data: only {len(historical)} hours'}), 400
         
         weather_for_predict = []
         for hour in historical[-24:]:
@@ -329,8 +327,10 @@ def predict_for_date(date_str):
     
     except Exception as e:
         print(f"Date prediction error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-    
+
 @app.route('/api/gis/zones', methods=['GET'])
 def get_gis_zones():
     try:
@@ -430,7 +430,7 @@ def get_temporal_shap():
         'most_important_hour': 2,
         'explanation': 'Recent rainfall (2-6 hours ago) has strongest influence'
     })
-    
+
 @app.route('/api/gis/zone-risks', methods=['GET'])
 def get_zone_risk_multipliers():
     try:
@@ -454,4 +454,12 @@ def get_zone_risk_multipliers():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print(f"Starting FloodCast server on port {port}")
+    print(f"Available endpoints:")
+    print(f"  GET /health")
+    print(f"  GET /api/predict/now")
+    print(f"  GET /api/predict/hour/0")
+    print(f"  GET /api/predict/date/2026-04-10")
+    print(f"  GET /api/forecast/7day")
+    print(f"  GET /api/gis/zones")
+    print(f"  POST /api/shap/features")
     app.run(host='0.0.0.0', port=port, debug=False)
