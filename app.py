@@ -172,6 +172,7 @@ def predict_for_hour(offset):
         offset = int(offset)
         target_time = datetime.now() + timedelta(hours=offset)
         
+        # Get the last 24 hours of historical data
         historical = get_historical_hours(24)
         
         if len(historical) < 24:
@@ -182,11 +183,10 @@ def predict_for_hour(offset):
                     'soil_moisture': 0.25
                 })
         
-        last_24h = historical[-24:]
-        
-        weather_for_predict = []
-        for hour in last_24h:
-            weather_for_predict.append({
+        # Use the last 24 hours as the sequence
+        weather_sequence = []
+        for hour in historical[-24:]:
+            weather_sequence.append({
                 'Rainfall_mmhr': hour.get('rainfall', 0),
                 'Temperature_C': hour.get('temperature', 25),
                 'Humidity_pct': hour.get('humidity', 70),
@@ -197,7 +197,7 @@ def predict_for_hour(offset):
             })
         
         wet = is_wet_season()
-        prediction = predictor.predict(weather_for_predict, wet_season=wet)
+        prediction = predictor.predict(weather_sequence, wet_season=wet)
         
         zone_probs = apply_gis_multiplier(prediction['calibrated_probability'], zone_risks)
         
@@ -213,7 +213,7 @@ def predict_for_hour(offset):
     except Exception as e:
         print(f"Hour prediction error: {e}")
         return jsonify({'error': str(e)}), 500
-
+    
 @app.route('/api/forecast/7day', methods=['GET'])
 def get_7day_forecast():
     try:
