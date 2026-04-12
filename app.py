@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
-from utils.weather_api import get_current_weather, get_forecast_7days, get_historical_hours, get_hours_for_date
+from utils.weather_api import get_current_weather, get_forecast_7days, get_historical_hours, get_hours_for_week
 from utils.predictor import FloodPredictor
 from utils.gis_fusion import load_zone_risks, apply_gis_multiplier, get_zone_geojson, get_alert_level
 
@@ -22,7 +22,7 @@ CORS(app)
 model_path = os.path.join(os.path.dirname(__file__), 'models', 'final_model.tflite')
 scaler_path = os.path.join(os.path.dirname(__file__), 'models', 'scaler.pkl')
 iso_path = os.path.join(os.path.dirname(__file__), 'models', 'gru_iso.pkl')
-shap_path = os.path.join(os.path.dirname(__file__), 'models', 'shap_values.npy')
+shap_path = os.path.join(os.path.dirname(__file__), 'models', 'shap_values_flood_test.npy')
 
 print("Loading models...")
 predictor = FloodPredictor(model_path, scaler_path, iso_path)
@@ -53,6 +53,12 @@ try:
 except Exception as e:
     print(f"Error loading SHAP values: {e}")
     shap_values = None
+
+# Build a {feature_name: importance} dict used by get_context_summary to pick top driver
+shap_weight_dict = None
+if shap_values is not None and len(shap_values) == len(feature_names):
+    shap_weight_dict = {feature_names[i]: float(shap_values[i]) for i in range(len(feature_names))}
+    print(f"SHAP weight dict built: {len(shap_weight_dict)} features")
 
 def get_feature_description(feature):
     descriptions = {
@@ -104,6 +110,25 @@ def is_wet_season():
     current_month = datetime.now().month
     return current_month in [11, 12, 1, 2, 3, 4]
 
+def _build_weather_sequence(hours):
+    """
+    Convert raw weather records from weather_api into the format the predictor expects.
+    Critically preserves the 'time' key so the predictor can compute monthly SM_anomaly.
+    """
+    seq = []
+    for h in hours:
+        seq.append({
+            'time':           h.get('time', ''),
+            'rainfall':       h.get('rainfall', 0.0) or 0.0,
+            'temperature':    h.get('temperature', 25.0) or 25.0,
+            'humidity':       h.get('humidity', 70.0) or 70.0,
+            'wind_speed':     h.get('wind_speed', 5.0) or 5.0,
+            'wind_dir':       h.get('wind_dir', 180.0) or 180.0,
+            'soil_moisture':       h.get('soil_moisture', 0.25) or 0.25,
+            'soil_moisture_deep':  h.get('soil_moisture_deep', h.get('soil_moisture', 0.30)) or 0.30,
+        })
+    return seq
+
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({'status': 'ok', 'timestamp': datetime.now().isoformat()})
@@ -112,49 +137,28 @@ def health_check():
 def predict_now():
     try:
         current = get_current_weather()
-        historical = get_historical_hours(24)
-        
+        # 7 days of history for proper API warm-up in the predictor
+        historical = get_historical_hours(168)
         if len(historical) < 24:
             return jsonify({'error': 'Insufficient historical data'}), 400
-        
-        last_24h = historical[-24:]
-        
-        weather_for_predict = []
-        for hour in last_24h:
-            weather_for_predict.append({
-                'Rainfall_mmhr': hour.get('rainfall', 0),
-                'Temperature_C': hour.get('temperature', 25),
-                'Humidity_pct': hour.get('humidity', 70),
-                'WindSpeed_ms': hour.get('wind_speed', 5),
-                'WindDir_deg': hour.get('wind_dir', 180),
-                'SoilMoist_top_m3': hour.get('soil_moisture', 0.25),
-                'SoilMoist_deep_m3': hour.get('soil_moisture', 0.30)
-            })
-        
+
         wet = is_wet_season()
-        prediction = predictor.predict(weather_for_predict, wet_season=wet)
-        
+        prediction = predictor.predict(_build_weather_sequence(historical), wet_season=wet)
+
         zone_probs = apply_gis_multiplier(prediction['calibrated_probability'], zone_risks)
-        
         zone_alerts = {}
         for zone, prob in zone_probs.items():
             color, message = get_alert_level(prob, wet)
-            zone_alerts[zone] = {
-                'probability': round(prob, 4),
-                'alert_level': color,
-                'message': message
-            }
-        
-        response = {
+            zone_alerts[zone] = {'probability': round(prob, 4), 'alert_level': color, 'message': message}
+
+        return jsonify({
             'timestamp': datetime.now().isoformat(),
             'city_prediction': prediction,
             'zone_predictions': zone_alerts,
             'current_weather': current,
             'wet_season': wet
-        }
-        
-        return jsonify(response)
-    
+        })
+
     except Exception as e:
         print(f"Prediction error: {e}")
         return jsonify({'error': str(e)}), 500
@@ -163,38 +167,37 @@ def predict_now():
 def predict_for_hour(offset):
     try:
         target_time = datetime.now() + timedelta(hours=offset)
-        
-        historical = get_historical_hours(24)
-        
+        wet         = is_wet_season()
+        historical  = get_historical_hours(168)
         if len(historical) < 24:
             return jsonify({'error': 'Insufficient historical data'}), 400
-        
-        weather_sequence = []
-        for hour in historical[-24:]:
-            weather_sequence.append({
-                'Rainfall_mmhr': hour.get('rainfall', 0),
-                'Temperature_C': hour.get('temperature', 25),
-                'Humidity_pct': hour.get('humidity', 70),
-                'WindSpeed_ms': hour.get('wind_speed', 5),
-                'WindDir_deg': hour.get('wind_dir', 180),
-                'SoilMoist_top_m3': hour.get('soil_moisture', 0.25),
-                'SoilMoist_deep_m3': hour.get('soil_moisture', 0.30)
-            })
-        
-        wet = is_wet_season()
-        prediction = predictor.predict(weather_sequence, wet_season=wet)
-        
+
+        if offset <= 0:
+            # Past or current hour: trim history to the target point so the
+            # model sees data up to (and including) that hour only.
+            trim = min(abs(offset), len(historical) - 24)
+            source_hours = historical[:-trim] if trim > 0 else historical
+        else:
+            # Future hour: append forecast hours up to the target offset.
+            try:
+                forecast     = get_forecast_7days()
+                future_slice = forecast[:offset]
+                source_hours = historical + future_slice
+            except Exception:
+                source_hours = historical
+
+        prediction = predictor.predict(_build_weather_sequence(source_hours), wet_season=wet)
+        ctx        = predictor.get_context_summary(source_hours, shap_weights=shap_weight_dict)
         zone_probs = apply_gis_multiplier(prediction['calibrated_probability'], zone_risks)
-        
-        response = {
-            'target_hour': target_time.isoformat(),
-            'hour_offset': offset,
-            'prediction': prediction,
-            'zone_probabilities': zone_probs
-        }
-        
-        return jsonify(response)
-    
+
+        return jsonify({
+            'target_hour':        target_time.isoformat(),
+            'hour_offset':        offset,
+            'prediction':         prediction,
+            'zone_probabilities': zone_probs,
+            **ctx
+        })
+
     except Exception as e:
         print(f"Hour prediction error: {e}")
         return jsonify({'error': str(e)}), 500
@@ -202,79 +205,136 @@ def predict_for_hour(offset):
 @app.route('/api/forecast/7day', methods=['GET'])
 def get_7day_forecast():
     try:
-        forecast = get_forecast_7days()
-        
+        from_date_str = request.args.get('from', None)
+        if from_date_str:
+            from_date = datetime.strptime(from_date_str, '%Y-%m-%d')
+        else:
+            from_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        wet = is_wet_season()
+
+        # Fetch all 7 days in a single API call
+        all_hours = get_hours_for_week(from_date, num_days=7)
+
+        # Group hours by date
+        hours_by_date = {}
+        for h in all_hours:
+            dk = h['time'][:10]
+            if dk not in hours_by_date:
+                hours_by_date[dk] = []
+            hours_by_date[dk].append(h)
+
         daily_summary = []
-        current_date = None
-        daily_rain = 0
-        
-        for hour in forecast:
+        default_hour = {'time': '', 'rainfall': 0.0, 'temperature': 25.0, 'humidity': 70.0,
+                        'wind_speed': 5.0, 'wind_dir': 180.0, 'soil_moisture': 0.25}
+
+        # Collect all available hours in chronological order for API warm-up
+        all_sorted = sorted(all_hours, key=lambda h: h['time'])
+
+        for day_offset in range(7):
+            target_day = from_date + timedelta(days=day_offset)
+            target_day_str = target_day.strftime('%Y-%m-%d')
+
             try:
-                hour_time = datetime.fromisoformat(hour['time'].replace('Z', '+00:00'))
-            except:
-                hour_time = datetime.now()
-            
-            date_key = hour_time.strftime('%Y-%m-%d')
-            
-            if current_date is None:
-                current_date = date_key
-            
-            if date_key != current_date:
-                if daily_rain > 50:
-                    risk_score = 0.35
-                elif daily_rain > 30:
-                    risk_score = 0.20
-                elif daily_rain > 15:
-                    risk_score = 0.10
-                elif daily_rain > 5:
-                    risk_score = 0.05
-                else:
-                    risk_score = 0.02
-                
+                day_hours = hours_by_date.get(target_day_str, [])
+
+                if len(day_hours) < 6:
+                    daily_summary.append({'date': target_day_str, 'total_rainfall': 0, 'max_risk_score': 0.01})
+                    continue
+
+                # Pad to 24 if partial day (e.g. today only has hours so far)
+                source_hours = day_hours[:24]
+                while len(source_hours) < 24:
+                    source_hours.append(source_hours[-1] if source_hours else default_hour)
+
+                total_rain = sum(h.get('rainfall', 0) or 0 for h in source_hours)
+
+                # Include all hours up to and including this day for API warm-up
+                target_end = target_day_str + 'T23:59'
+                warmup = [h for h in all_sorted if h['time'] <= target_end]
+                if len(warmup) < 24:
+                    warmup = source_hours
+                seq = _build_weather_sequence(warmup)
+
+                prediction = predictor.predict(seq, wet_season=wet)
                 daily_summary.append({
-                    'date': current_date,
-                    'total_rainfall': round(daily_rain, 1),
-                    'max_risk_score': risk_score
+                    'date': target_day_str,
+                    'total_rainfall': round(total_rain, 1),
+                    'max_risk_score': prediction['calibrated_probability']
                 })
-                current_date = date_key
-                daily_rain = 0
-            
-            rain = hour.get('rainfall', 0)
-            daily_rain += rain
-        
-        if daily_rain > 0 or len(daily_summary) < 7:
-            if daily_rain > 50:
-                risk_score = 0.35
-            elif daily_rain > 30:
-                risk_score = 0.20
-            elif daily_rain > 15:
-                risk_score = 0.10
-            elif daily_rain > 5:
-                risk_score = 0.05
-            else:
-                risk_score = 0.02
-            
-            daily_summary.append({
-                'date': current_date,
-                'total_rainfall': round(daily_rain, 1),
-                'max_risk_score': risk_score
-            })
-        
-        while len(daily_summary) < 7:
-            last_date = datetime.now() + timedelta(days=len(daily_summary))
-            daily_summary.append({
-                'date': last_date.strftime('%Y-%m-%d'),
-                'total_rainfall': 0,
-                'max_risk_score': 0.01
-            })
-        
-        return jsonify({
-            'forecast': daily_summary[:7]
-        })
-    
+
+            except Exception as day_err:
+                print(f"Error for day {target_day_str}: {day_err}")
+                daily_summary.append({'date': target_day_str, 'total_rainfall': 0, 'max_risk_score': 0.01})
+
+        return jsonify({'forecast': daily_summary[:7]})
+
     except Exception as e:
         print(f"Forecast error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'forecast': []}), 500
+
+
+@app.route('/api/predict/date/<date_str>/hours', methods=['GET'])
+def predict_date_hours(date_str):
+    try:
+        target_date = datetime.strptime(date_str, '%Y-%m-%d')
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        days_diff = (target_date.date() - today.date()).days
+
+        if days_diff > 0:
+            return jsonify({'error': 'Hourly predictions only available for today and past dates.'}), 400
+
+        wet = is_wet_season()
+
+        # Fetch 8 days ending on target date for proper API warm-up:
+        # 7 warmup days + target day itself
+        warmup_start = target_date - timedelta(days=7)
+        all_hours = get_hours_for_week(warmup_start, num_days=8)
+
+        target_day_str = target_date.strftime('%Y-%m-%d')
+        target_hours = [h for h in all_hours if h['time'][:10] == target_day_str]
+
+        default_hour = {'time': target_day_str + 'T00:00', 'rainfall': 0.0, 'temperature': 25.0,
+                        'humidity': 70.0, 'wind_speed': 5.0, 'wind_dir': 180.0, 'soil_moisture': 0.25}
+        while len(target_hours) < 24:
+            target_hours.append(target_hours[-1] if target_hours else default_hour)
+        target_hours = target_hours[:24]
+
+        # All hours up to end of this day (chronological) — full warm-up history
+        all_sorted = sorted(all_hours, key=lambda h: h['time'])
+
+        hourly_predictions = []
+        for h in range(24):
+            target_hour_str = f'{target_day_str}T{str(h).zfill(2)}:59'
+            raw_context = [rec for rec in all_sorted if rec['time'] <= target_hour_str]
+
+            # Context summary from raw hours (before sequence building)
+            ctx = predictor.get_context_summary(raw_context, shap_weights=shap_weight_dict)
+
+            if len(raw_context) < 24:
+                padding      = [default_hour] * (24 - len(raw_context))
+                built_context = _build_weather_sequence(padding + raw_context)
+            else:
+                built_context = _build_weather_sequence(raw_context)
+
+            pred = predictor.predict(built_context, wet_season=wet)
+            hourly_predictions.append({
+                'hour':        h,
+                'time':        f'{target_day_str}T{str(h).zfill(2)}:00',
+                'probability': pred['calibrated_probability'],
+                'prediction':  pred['prediction'],
+                **ctx
+            })
+
+        return jsonify({'date': date_str, 'hourly': hourly_predictions})
+
+    except Exception as e:
+        print(f"Hourly date prediction error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/predict/date/<date_str>', methods=['GET'])
 def predict_for_date(date_str):
@@ -288,24 +348,15 @@ def predict_for_date(date_str):
         current_weather_data = None
 
         if days_diff == 0:
-            # Today: use same data source as /api/predict/now
+            # Today — fetch 7 days for API warm-up
             current_weather_data = get_current_weather()
-            historical = get_historical_hours(24)
+            historical = get_historical_hours(168)
             if len(historical) < 24:
                 return jsonify({'error': 'Insufficient historical data for today'}), 400
-            for hour in historical[-24:]:
-                weather_for_predict.append({
-                    'Rainfall_mmhr': hour.get('rainfall', 0),
-                    'Temperature_C': hour.get('temperature', 25),
-                    'Humidity_pct': hour.get('humidity', 70),
-                    'WindSpeed_ms': hour.get('wind_speed', 5),
-                    'WindDir_deg': hour.get('wind_dir', 180),
-                    'SoilMoist_top_m3': hour.get('soil_moisture', 0.25),
-                    'SoilMoist_deep_m3': hour.get('soil_moisture', 0.30)
-                })
+            weather_for_predict = _build_weather_sequence(historical)
 
         elif days_diff > 0:
-            # Future date: use 7-day forecast data
+            # Future date — use 7-day forecast; warm up with recent history prepended
             if days_diff > 7:
                 return jsonify({'error': 'Forecast only available up to 7 days ahead'}), 400
             forecast = get_forecast_7days()
@@ -313,19 +364,12 @@ def predict_for_date(date_str):
             date_hours = [h for h in forecast if h['time'][:10] == target_date_key]
             if len(date_hours) < 12:
                 return jsonify({'error': f'No forecast data available for {date_str}'}), 400
-            source_hours = date_hours[:24]
-            while len(source_hours) < 24:
-                source_hours.append(source_hours[-1])
-            for hour in source_hours:
-                weather_for_predict.append({
-                    'Rainfall_mmhr': hour.get('rainfall', 0),
-                    'Temperature_C': hour.get('temperature', 25),
-                    'Humidity_pct': hour.get('humidity', 70),
-                    'WindSpeed_ms': hour.get('wind_speed', 5),
-                    'WindDir_deg': hour.get('wind_dir', 180),
-                    'SoilMoist_top_m3': 0.25,
-                    'SoilMoist_deep_m3': 0.30
-                })
+            # Prepend recent historical hours as warm-up context
+            recent = get_historical_hours(168)
+            source = date_hours[:24]
+            while len(source) < 24:
+                source.append(source[-1])
+            weather_for_predict = _build_weather_sequence(recent + source)
             if date_hours:
                 first = date_hours[0]
                 current_weather_data = {
@@ -338,22 +382,15 @@ def predict_for_date(date_str):
                 }
 
         else:
-            # Historical date: use forecast API for recent dates, archive for older ones
-            historical = get_hours_for_date(target_date)
-            if len(historical) < 24:
-                return jsonify({'error': f'Insufficient data: only {len(historical)} hours available for {date_str}. The weather archive may not cover this date yet.'}), 400
-            for hour in historical[-24:]:
-                weather_for_predict.append({
-                    'Rainfall_mmhr': hour.get('rainfall', 0),
-                    'Temperature_C': hour.get('temperature', 25),
-                    'Humidity_pct': hour.get('humidity', 70),
-                    'WindSpeed_ms': hour.get('wind_speed', 5),
-                    'WindDir_deg': hour.get('wind_dir', 180),
-                    'SoilMoist_top_m3': hour.get('soil_moisture', 0.25),
-                    'SoilMoist_deep_m3': hour.get('soil_moisture', 0.30)
-                })
-            if historical:
-                first = historical[0]
+            # Historical — fetch 7 warmup days + target date
+            warmup_start = target_date - timedelta(days=7)
+            all_hrs = get_hours_for_week(warmup_start, num_days=8)
+            target_day_hours = [h for h in all_hrs if h['time'][:10] == date_str]
+            if len(target_day_hours) < 1:
+                return jsonify({'error': f'No data available for {date_str}'}), 400
+            weather_for_predict = _build_weather_sequence(all_hrs)
+            if target_day_hours:
+                first = target_day_hours[0]
                 current_weather_data = {
                     'temp': first.get('temperature'),
                     'humidity': first.get('humidity'),
@@ -520,8 +557,10 @@ if __name__ == '__main__':
     print(f"  GET /health")
     print(f"  GET /api/predict/now")
     print(f"  GET /api/predict/hour/0")
-    print(f"  GET /api/predict/date/2026-04-10")
+    print(f"  GET /api/predict/date/2026-04-11")
+    print(f"  GET /api/predict/date/2026-04-11/hours")
     print(f"  GET /api/forecast/7day")
+    print(f"  GET /api/forecast/7day?from=2026-04-11")
     print(f"  GET /api/gis/zones")
     print(f"  POST /api/shap/features")
     app.run(host='0.0.0.0', port=port, debug=False)

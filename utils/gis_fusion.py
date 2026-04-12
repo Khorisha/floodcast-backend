@@ -6,35 +6,36 @@ import os
 def load_zone_risks():
     file_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'zone_risk_lookup.csv')
     df = pd.read_csv(file_path)
-    
-    # Print columns to debug
-    print("CSV columns:", df.columns.tolist())
-    
-    # Try different possible column names
+
+    # Detect columns flexibly
     zone_col = None
     risk_col = None
-    
     for col in df.columns:
-        if 'zone' in col.lower() or 'Zone' in col or 'name' in col.lower():
+        cl = col.lower()
+        if 'zone' in cl or 'name' in cl:
             zone_col = col
-        if 'risk' in col.lower() or 'Risk' in col or 'mean' in col.lower():
+        if 'risk' in cl or 'mean' in cl:
             risk_col = col
-    
     if zone_col is None:
-        zone_col = df.columns[0]  # First column as zone name
+        zone_col = df.columns[0]
     if risk_col is None:
-        risk_col = df.columns[1]  # Second column as risk
-    
-    print(f"Using zone column: {zone_col}, risk column: {risk_col}")
-    
-    return dict(zip(df[zone_col], df[risk_col]))
+        risk_col = df.columns[1]
 
-def apply_gis_multiplier(city_prob, zone_risks, base_risk=3.87):
+    raw = dict(zip(df[zone_col], df[risk_col]))
+
+    # Normalise names to match GeoJSON (e.g. "Port Louis CBD" → "CBD")
+    NAME_MAP = {'Port Louis CBD': 'CBD'}
+    return {NAME_MAP.get(k, k): v for k, v in raw.items()}
+
+def apply_gis_multiplier(city_prob, zone_risks):
+    """
+    GIS Post-Hoc Fusion:
+        zone_prob_i = baseline_prob × (1 + risk_mean_i / 5)
+    Capped at 0.99 to keep it a valid probability.
+    """
     zone_probs = {}
     for zone, risk in zone_risks.items():
-        multiplier = 1 + (risk - base_risk) / base_risk
-        multiplier = max(0.7, min(1.5, multiplier))
-        zone_probs[zone] = min(0.99, city_prob * multiplier)
+        zone_probs[zone] = min(0.99, city_prob * (1 + risk / 5))
     return zone_probs
 
 def get_zone_geojson():
