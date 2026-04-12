@@ -8,11 +8,6 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Ignore model weights and checkpoints
-backend/models/
-*.pkl
-*.tflite
-
 # Ignore data and logs
 backend/data/
 *.log
