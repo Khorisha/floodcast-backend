@@ -342,7 +342,11 @@ class FloodPredictor:
 
             calibrated_prob *= 1.05 if wet_season else 0.95
 
-            has_rain = any((h.get('rainfall') or 0) > 1.0 for h in hours[-6:])
+            # Use a 24-hour window so morning rain events are not missed when
+            # the model is evaluated at end-of-day (7-day forecast path).
+            # With a 6-hour window, any rain that fell earlier in the day
+            # would be invisible here and the probability was wrongly capped.
+            has_rain = any((h.get('rainfall') or 0) > 1.0 for h in hours[-24:])
             if not has_rain:
                 calibrated_prob = min(calibrated_prob, 0.05)
 
