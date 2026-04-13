@@ -2,6 +2,7 @@ import requests
 import csv
 import os
 import math
+import time
 from datetime import datetime, timedelta
 
 PORT_LOUIS_LAT = -20.1609
@@ -14,6 +15,22 @@ ERA5_END   = datetime(2024, 12, 31, 23, 0, 0)
 # Rainfall stored RAW — predictor applies convective correction internally.
 # Soil moisture is scaled here because the predictor does not adjust it.
 _era5_cache = None
+
+# In-memory TTL cache — avoids repeated Open-Meteo calls across parallel requests.
+# Each entry: { key: (value, timestamp) }
+_api_cache     = {}
+_CACHE_TTL_SEC = 300  # 5 minutes
+
+
+def _cache_get(key):
+    entry = _api_cache.get(key)
+    if entry and (time.time() - entry[1]) < _CACHE_TTL_SEC:
+        return entry[0]
+    return None
+
+
+def _cache_set(key, value):
+    _api_cache[key] = (value, time.time())
 
 
 def _load_era5_cache():
@@ -105,6 +122,9 @@ def get_era5_hours_for_range(from_dt, to_dt):
 
 
 def get_current_weather():
+    cached = _cache_get('current_weather')
+    if cached is not None:
+        return cached
     try:
         url = 'https://api.open-meteo.com/v1/forecast'
         params = {
@@ -117,7 +137,7 @@ def get_current_weather():
         current = response.json().get('current', {})
         if not current:
             raise ValueError("No current weather data received")
-        return {
+        result = {
             'temp':       current.get('temperature_2m'),
             'humidity':   current.get('relative_humidity_2m'),
             'pressure':   current.get('pressure_msl'),
@@ -126,6 +146,8 @@ def get_current_weather():
             'rain_1h':    current.get('precipitation', 0),
             'timestamp':  datetime.now().isoformat()
         }
+        _cache_set('current_weather', result)
+        return result
     except Exception as e:
         print(f"Weather API error: {e}")
         raise Exception(f"Failed to fetch current weather: {str(e)}")
@@ -133,6 +155,9 @@ def get_current_weather():
 
 def get_forecast_7days():
     """7-day hourly forecast with soil moisture scaled to ERA5 range."""
+    cached = _cache_get('forecast_7days')
+    if cached is not None:
+        return cached
     try:
         url = 'https://api.open-meteo.com/v1/forecast'
         params = {
@@ -158,6 +183,7 @@ def get_forecast_7days():
                 'wind_dir':     _v(hourly['wind_direction_10m'][i], 180.0),
                 'soil_moisture': _v(sm_list[i] if sm_list else None, 0.25),
             }))
+        _cache_set('forecast_7days', records)
         return records
     except Exception as e:
         print(f"Forecast API error: {e}")
@@ -173,6 +199,12 @@ def get_historical_hours(hours_back=168):
     from_dt = now - timedelta(hours=hours_back)
     if _era5_available(from_dt, now):
         return get_era5_hours_for_range(from_dt, now)
+
+    cache_key = f'historical_{hours_back}'
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     try:
         past_days = max(2, math.ceil(hours_back / 24) + 2)
         url = 'https://api.open-meteo.com/v1/forecast'
@@ -199,7 +231,9 @@ def get_historical_hours(hours_back=168):
                 'wind_dir':     _v(hourly['wind_direction_10m'][i], 180.0),
                 'soil_moisture': _v(sm_list[i] if sm_list else None, 0.25),
             }))
-        return records[-hours_back:] if len(records) >= hours_back else records
+        result = records[-hours_back:] if len(records) >= hours_back else records
+        _cache_set(cache_key, result)
+        return result
     except Exception as e:
         print(f"Historical API error: {e}")
         raise Exception(f"Failed to fetch historical weather data: {str(e)}")

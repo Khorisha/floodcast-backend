@@ -136,11 +136,29 @@ def health_check():
 @app.route('/api/predict/now', methods=['GET'])
 def predict_now():
     try:
-        current = get_current_weather()
-        # 7 days of history for proper API warm-up in the predictor
+        # Fetch current weather independently — don't let a 429 here abort the prediction.
+        current = None
+        try:
+            current = get_current_weather()
+        except Exception as cw_err:
+            print(f"Current weather fetch skipped: {cw_err}")
+
         historical = get_historical_hours(168)
         if len(historical) < 24:
             return jsonify({'error': 'Insufficient historical data'}), 400
+
+        # Fall back to the most recent historical hour if current weather unavailable.
+        if current is None and historical:
+            last = historical[-1]
+            current = {
+                'temp':       last.get('temperature', 25),
+                'humidity':   last.get('humidity', 70),
+                'pressure':   last.get('pressure', 1013),
+                'wind_speed': last.get('wind_speed', 5),
+                'wind_dir':   last.get('wind_dir', 180),
+                'rain_1h':    last.get('rainfall', 0),
+                'timestamp':  last.get('time', datetime.now().isoformat())
+            }
 
         wet = is_wet_season()
         prediction = predictor.predict(_build_weather_sequence(historical), wet_season=wet)
@@ -163,8 +181,12 @@ def predict_now():
         print(f"Prediction error: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/predict/hour/<int:offset>', methods=['GET'])
+@app.route('/api/predict/hour/<offset>', methods=['GET'])
 def predict_for_hour(offset):
+    try:
+        offset = int(offset)
+    except ValueError:
+        return jsonify({'error': 'Invalid offset'}), 400
     try:
         target_time = datetime.now() + timedelta(hours=offset)
         wet         = is_wet_season()
