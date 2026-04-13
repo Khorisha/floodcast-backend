@@ -171,10 +171,13 @@ class FloodPredictor:
         }
 
         if shap_weights and len(shap_weights) > 0:
-            # Weight activation by SHAP importance — picks the feature that is
-            # both highly active right now AND historically important for floods
+            # Normalise SHAP weights to [0, 1] so the weighted score stays in
+            # the same range as the raw activation scores (0–1).  Without this,
+            # SHAP values (~0.0008) multiplied by activations always produce
+            # scores far below the 0.01 threshold → "No dominant driver" always.
+            max_shap = max(shap_weights.values()) or 1e-8
             weighted = {
-                feat: feature_activations.get(feat, 0.0) * shap_weights.get(feat, 0.0)
+                feat: feature_activations.get(feat, 0.0) * (shap_weights.get(feat, 0.0) / max_shap)
                 for feat in feature_activations
             }
             top_feat  = max(weighted, key=weighted.get)

@@ -235,8 +235,12 @@ def get_7day_forecast():
 
         wet = is_wet_season()
 
-        # Fetch all 7 days in a single API call
-        all_hours = get_hours_for_week(from_date, num_days=7)
+        # Fetch 7 warmup days + 7 target days so the Antecedent Precipitation
+        # Index (API) and rolling rainfall sums are properly initialised for
+        # the first target day.  Without warmup, day-1 API starts at 0 and
+        # the model outputs a near-zero probability regardless of actual rain.
+        warmup_start = from_date - timedelta(days=7)
+        all_hours = get_hours_for_week(warmup_start, num_days=14)
 
         # Group hours by date
         hours_by_date = {}
