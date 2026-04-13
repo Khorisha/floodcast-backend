@@ -8,10 +8,6 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Ignore data and logs
-backend/data/
-*.log
-*.tmp
 
 # Ignore static build artifacts
 backend/static/
